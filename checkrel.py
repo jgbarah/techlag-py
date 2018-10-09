@@ -26,6 +26,7 @@ import glob
 import datetime
 import distutils.core
 import json
+import logging
 import os
 import urllib.request
 import urllib.parse
@@ -41,6 +42,20 @@ import requirements
 import semantic_version
 
 from pprint import pprint
+
+def set_logging(args_logging, args_logfile=None):
+
+    log_format = '%(levelname)s:%(message)s'
+    if args_logging == "info":
+        level = logging.INFO
+    elif args_logging == "debug":
+        level = logging.DEBUG
+    if args_logfile:
+        logging.basicConfig(format=log_format, level=level,
+                            filename = args_logfile, filemode = "w")
+    else:
+        logging.basicConfig(format=log_format, level=level)
+
 
 def find_source(release_data: List) -> Dict:
     """Find source information in release data
@@ -71,14 +86,14 @@ def get_requires(dir: str) -> str:
     if len(egg_info) == 1:
         try:
             with open(os.path.join(egg_info[0], 'requires.txt'), 'r') as req_file:
-                print("Found dependencies in egg:", egg_info[0])
+                logging.debug("Found dependencies in egg: " + egg_info[0])
                 requires = req_file.read().splitlines()
         except FileNotFoundError:
             pass
         except:
             raise
     if len(requires) == 0:
-        print("Dependencies not found in egg, running setup.py")
+        logging.debug("Dependencies not found in egg, running setup.py")
         my_dir = os.getcwd()
         os.chdir(dir)
         sys_path = sys.path
@@ -87,7 +102,7 @@ def get_requires(dir: str) -> str:
         sys.path = sys_path
         os.chdir(my_dir)
         requires = setup.install_requires
-    print("Requires:", requires)
+    logging.debug("Requires: " + str(requires))
     return requires
 
 def get_package_dir(extract_dir: str) -> str:
@@ -127,7 +142,7 @@ def find_dependencies(file_data: Dict):
             with zipfile.ZipFile(BytesIO(release_stream.read())) as zip_file:
                 zip_file.extractall(extract_dir)
         else:
-            print("Unknown extension:", ext)
+            logging.debug("Unknown extension: " + ext)
             sys.exit(1)
         dir = get_package_dir(extract_dir)
         return get_requires(dir)
@@ -142,21 +157,12 @@ def split_dependency(dep: str) -> (str, List):
     :return:   pair (package, list of specs)
     """
 
-    req = next(requirements.parse(dependency))
+    req = next(requirements.parse(dep))
     package = req.name
     specs = [s[0]+str(semantic_version.Version.coerce(s[1])) for s in req.specs]
     spec = semantic_version.Spec(*specs)
     return (package, spec)
 
-
-parser = argparse.ArgumentParser(description='Get technical lag for a Pypi package.')
-parser.add_argument('package',
-                    help='package to analyze')
-parser.add_argument('version',
-                    help='version to analyze')
-args = parser.parse_args()
-
-print(args.package)
 
 def lag_package(package, spec):
     """Compute lag for a package"""
@@ -172,14 +178,14 @@ def lag_package(package, spec):
             rel_data = data['releases'][release]
             data['releases'][normal_release] = rel_data
 
-    print("Current version:", current)
+    logging.debug("Current version: " + current)
     current_file = find_source(data['releases'][str(current)])
     releases = sorted([semantic_version.Version.coerce(release) for release in data['releases'].keys()])
 
     to_check = spec.select(releases)
-    print("Version to check:", to_check)
+    logging.debug("Version to check: " + str(to_check))
     for count, release in enumerate(reversed(releases)):
-        print(release)
+        logging.debug(release)
         if release <= to_check:
             to_check_file = find_source(data['releases'][str(release)])
             to_check_released = datetime.datetime.strptime(to_check_file['upload_time'],
@@ -190,18 +196,59 @@ def lag_package(package, spec):
             dependencies = find_dependencies(to_check_file)
             return (release, count, lag_released, dependencies)
 
-constraint = semantic_version.Spec('==' + str(semantic_version.Version.coerce(args.version)))
-(release, count, lag_released, dependencies) = lag_package(args.package, constraint)
 
-print("Release found: {} {}".format(args.package, release))
-print("Lag (number of releases): {}".format(count))
-print("Lag (release dates): {}".format(lag_released))
-print("Dependencies: {}".format(','.join(dependencies)))
-for dependency in dependencies:
-    (package, spec) = split_dependency(dependency)
-    print("  {}: {}".format(package, str(spec)))
-    (release, count, lag_released, dependencies) = lag_package(package, spec)
-    print("    Release found: {} {}".format(package, release))
-    print("    Lag (number of releases): {}".format(count))
-    print("    Lag (release dates): {}".format(lag_released))
-    print("    Dependencies: {}".format(','.join(dependencies)))
+def lag_package_transitive(package: str, constraint: semantic_version.Spec, depth: int = 0):
+    """Compute lag for package and all its transitive dependencies.
+
+    Returns the release (version) considered for the package, the count of packages,
+    the lag (released time) and the dependencies.
+
+    :param package:    package to analyze
+    :param constraint: constraint (semantic_version.Spec) for the package
+    :param depth:      depth of the call (starts in 0, default)
+    :return:           (release, count, lag_released, dependencies)
+    """
+
+    (release, count, lag_released, dependencies) = lag_package(package, constraint)
+    print("  "*depth + "Package: {}, release considered: {}.".format(package, release))
+    print("  "*depth + "Lag (number of releases): {}".format(count))
+    print("  "*depth + "Lag (release dates): {}".format(lag_released))
+    print("  "*depth + "Dependencies: {}".format(','.join(dependencies)))
+    logging.debug("Dependencies: " + str(dependencies))
+    for dependency in dependencies:
+        (pkg, spec) = split_dependency(dependency)
+        logging.debug("Going to compute lag for {} {}.".format(pkg, spec))
+        (rel, c, lag_rel, dep) = lag_package_transitive(pkg, spec, depth+1)
+    return (release, count, lag_released, dependencies)
+
+parser = argparse.ArgumentParser(description='Get technical lag for a Pypi package.')
+parser.add_argument("-l", "--logging", type=str, choices=["info", "debug"],
+                    help="Logging level for output")
+parser.add_argument("--logfile", type=str,
+                    help="Log file")
+
+parser.add_argument('package',
+                    help='package to analyze')
+parser.add_argument('version',
+                    help='version to analyze')
+args = parser.parse_args()
+
+if args.logging:
+    set_logging(args.logging, args.logfile)
+logging.debug("Executed as: " + str(sys.argv))
+
+constraint = semantic_version.Spec('==' + str(semantic_version.Version.coerce(args.version)))
+(release, count, lag_released, dependencies) = lag_package_transitive(args.package, constraint)
+
+# print("Release found: {} {}".format(args.package, release))
+# print("Lag (number of releases): {}".format(count))
+# print("Lag (release dates): {}".format(lag_released))
+# print("Dependencies: {}".format(','.join(dependencies)))
+# for dependency in dependencies:
+#     (package, spec) = split_dependency(dependency)
+#     print("  {}: {}".format(package, str(spec)))
+#     (release, count, lag_released, dependencies) = lag_package(package, spec)
+#     print("    Release found: {} {}".format(package, release))
+#     print("    Lag (number of releases): {}".format(count))
+#     print("    Lag (release dates): {}".format(lag_released))
+#     print("    Dependencies: {}".format(','.join(dependencies)))

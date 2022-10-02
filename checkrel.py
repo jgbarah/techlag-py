@@ -137,7 +137,26 @@ def find_dependencies(file_data: Dict):
 #    for p in [1]:
         if ext == '.gz':
             with tarfile.open(fileobj=release_stream, mode="r|gz") as tar_file:
-                tar_file.extractall(extract_dir)
+                def is_within_directory(directory, target):
+                    
+                    abs_directory = os.path.abspath(directory)
+                    abs_target = os.path.abspath(target)
+                
+                    prefix = os.path.commonprefix([abs_directory, abs_target])
+                    
+                    return prefix == abs_directory
+                
+                def safe_extract(tar, path=".", members=None, *, numeric_owner=False):
+                
+                    for member in tar.getmembers():
+                        member_path = os.path.join(path, member.name)
+                        if not is_within_directory(path, member_path):
+                            raise Exception("Attempted Path Traversal in Tar File")
+                
+                    tar.extractall(path, members, numeric_owner) 
+                    
+                
+                safe_extract(tar_file, extract_dir)
         elif ext == '.zip':
             with zipfile.ZipFile(BytesIO(release_stream.read())) as zip_file:
                 zip_file.extractall(extract_dir)
